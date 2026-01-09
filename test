@@ -88,7 +88,7 @@ class P2PDiscovery:
                     if now - info["last_seen"] > timeout
                 ]
                 for aid in expired:
-                    print(f"\n[-] containere offline: {aid}")
+                    print(f"\n[-] container offline: {aid}")
                     del self.peers[aid]
             time.sleep(5)
 
@@ -98,7 +98,7 @@ class P2PDiscovery:
         threading.Thread(target=self.clean_expired_peers, daemon=True).start()
 
         print(
-            f"containere iniciado: {self.container_id} | IP: {self.ip} | MAC: {self.mac}"
+            f"[*] container iniciado: {self.container_id} | IP: {self.ip} | MAC: {self.mac}"
         )
         try:
             while True:

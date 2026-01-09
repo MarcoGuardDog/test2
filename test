@@ -104,4 +104,5 @@ class P2PDiscovery:
 
 if __name__ == "__main__":
     # Cambia 'eth0' por el nombre real de tu interfaz (ej. 'ens33' o 'eth1')
+    discovery = P2PDiscovery(interface_name="eth0")
     discovery.start()

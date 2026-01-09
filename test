@@ -43,7 +43,7 @@ class P2PDiscovery:
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 
         data = json.dumps(
-            {"agent_id": self.agent_id, "mac": self.mac, "ip": self.ip}
+            {"container_id": self.agent_id, "mac": self.mac, "ip": self.ip}
         ).encode("utf-8")
 
         while True:
@@ -70,14 +70,14 @@ class P2PDiscovery:
                 data, addr = sock.recvfrom(1024)
                 peer_info = json.loads(data.decode("utf-8"))
 
-                if peer_info["agent_id"] != self.agent_id:
+                if peer_info["container_id"] != self.agent_id:
                     with self.lock:
                         peer_info["last_seen"] = time.time()
-                        if peer_info["agent_id"] not in self.peers:
+                        if peer_info["container_id"] not in self.peers:
                             print(
-                                f"\n[+] Nuevo Agente: {peer_info['agent_id']} | IP: {peer_info['ip']} | MAC: {peer_info['mac']}"
+                                f"\n[+] Nuevo Agente: {peer_info['container_id']} | IP: {peer_info['ip']} | MAC: {peer_info['mac']}"
                             )
-                        self.peers[peer_info["agent_id"]] = peer_info
+                        self.peers[peer_info["container_id"]] = peer_info
             except Exception as e:
                 print(f"Error recibiendo: {e}")
 
@@ -91,7 +91,7 @@ class P2PDiscovery:
                     if now - info["last_seen"] > timeout
                 ]
                 for aid in expired:
-                    print(f"\n[-] Agente offline: {aid}")
+                    print(f"\n[-] Container_id offline: {aid}")
                     del self.peers[aid]
             time.sleep(5)
 
@@ -100,13 +100,13 @@ class P2PDiscovery:
         threading.Thread(target=self.listen_for_peers, daemon=True).start()
         threading.Thread(target=self.clean_expired_peers, daemon=True).start()
 
-        print(f"Agente iniciado: {self.agent_id} | IP: {self.ip} | MAC: {self.mac}")
+        print(f"Container iniciado: {self.agent_id} | IP: {self.ip} | MAC: {self.mac}")
         try:
             while True:
                 # Mostrar tabla de agentes activos cada 10 seg para debug
                 time.sleep(10)
                 with self.lock:
-                    print(f"\n--- Agentes Activos: {len(self.peers)} ---")
+                    print(f"\n--- Containers Activos: {len(self.peers)} ---")
                     for aid, info in self.peers.items():
                         print(f"ID: {aid} | IP: {info['ip']} | MAC: {info['mac']}")
         except KeyboardInterrupt:

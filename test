@@ -1,398 +1,80 @@
-#!/usr/bin/env python3
-"""
-Versión mejorada con comunicación TCP directa - SIN dependencia de broadcast UDP
-"""
-
 import socket
+import struct
 import json
+import uuid
 import threading
 import time
-import uuid
-from typing import Dict, List
-from dataclasses import dataclass, asdict
-import logging
+import os
 
-logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
-)
-logger = logging.getLogger(__name__)
+MCAST_GRP = "239.255.255.250"
+MCAST_PORT = 50000
+ANNOUNCE_INTERVAL = 3
+PEER_TTL = 10
 
+peers = {}
 
-@dataclass
-class ContainerAgent:
-    """Representa un agente de contenedor"""
+CONTAINER_ID = os.getenv("CONTAINER_ID", str(uuid.uuid4()))
 
-    agent_id: str
-    mac_address: str
-    ip_address: str
-    port: int = 5000
-    status: str = "active"
+def get_ip():
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.connect(("8.8.8.8", 80))
+    ip = s.getsockname()[0]
+    s.close()
+    return ip
 
-    def to_dict(self) -> dict:
-        return asdict(self)
+IP = get_ip()
 
-    @classmethod
-    def from_dict(cls, data: dict):
-        return cls(**data)
+def announce():
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+    sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 2)
 
+    while True:
+        msg = {
+            "id": CONTAINER_ID,
+            "ip": IP,
+            "ts": time.time()
+        }
+        sock.sendto(json.dumps(msg).encode(), (MCAST_GRP, MCAST_PORT))
+        time.sleep(ANNOUNCE_INTERVAL)
 
-class ContainerCommunicator:
-    """Gestiona la comunicación entre contenedores - versión TCP directa"""
+def listen():
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 
-    def __init__(self, agent: ContainerAgent, peers: List[str] = None):
-        self.agent = agent
-        self.known_agents: Dict[str, ContainerAgent] = {}
-        self.running = False
-        self.server_socket = None
-        # Lista de peers en formato "ip:port"
-        self.peers = peers or []
+    sock.bind(("", MCAST_PORT))
 
-    def start(self):
-        """Inicia el comunicador"""
-        self.running = True
-
-        # Inicia servidor de escucha
-        listener_thread = threading.Thread(target=self._listen_for_messages)
-        listener_thread.daemon = True
-        listener_thread.start()
-        time.sleep(0.5)
-
-        # Inicia descubrimiento activo de peers
-        discovery_thread = threading.Thread(target=self._discover_peers)
-        discovery_thread.daemon = True
-        discovery_thread.start()
-
-        logger.info(
-            f"Agente {self.agent.agent_id} iniciado en {self.agent.ip_address}:{self.agent.port}"
-        )
-        logger.info(f"Peers configurados: {self.peers}")
-
-    def stop(self):
-        """Detiene el comunicador"""
-        self.running = False
-        if self.server_socket:
-            self.server_socket.close()
-        logger.info(f"Agente {self.agent.agent_id} detenido")
-
-    def _listen_for_messages(self):
-        """Escucha mensajes entrantes"""
-        try:
-            self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            self.server_socket.bind((self.agent.ip_address, self.agent.port))
-            self.server_socket.listen(5)
-            self.server_socket.settimeout(1.0)
-
-            logger.info(f"Escuchando en {self.agent.ip_address}:{self.agent.port}")
-
-            while self.running:
-                try:
-                    client_socket, address = self.server_socket.accept()
-                    thread = threading.Thread(
-                        target=self._handle_client, args=(client_socket, address)
-                    )
-                    thread.daemon = True
-                    thread.start()
-                except socket.timeout:
-                    continue
-                except Exception as e:
-                    if self.running:
-                        logger.error(f"Error aceptando conexión: {e}")
-
-        except Exception as e:
-            logger.error(f"Error en servidor de escucha: {e}")
-
-    def _handle_client(self, client_socket: socket.socket, address):
-        """Maneja una conexión entrante"""
-        try:
-            data = b""
-            while True:
-                chunk = client_socket.recv(4096)
-                if not chunk:
-                    break
-                data += chunk
-
-            if data:
-                message = json.loads(data.decode("utf-8"))
-                self._process_message(message, address)
-
-                # Enviar respuesta
-                response = {
-                    "status": "received",
-                    "from_agent": self.agent.agent_id,
-                    "timestamp": time.time(),
-                }
-                client_socket.send(json.dumps(response).encode("utf-8"))
-
-        except Exception as e:
-            logger.error(f"Error manejando cliente {address}: {e}")
-        finally:
-            client_socket.close()
-
-    def _process_message(self, message: dict, address):
-        """Procesa un mensaje recibido"""
-        msg_type = message.get("type", "unknown")
-        from_agent = message.get("from_agent", "unknown")
-
-        if msg_type == "discovery":
-            # Otro agente se está anunciando
-            agent_data = message.get("agent", {})
-            agent_id = agent_data.get("agent_id")
-            if agent_id and agent_id != self.agent.agent_id:
-                agent = ContainerAgent.from_dict(agent_data)
-                self.known_agents[agent_id] = agent
-                print(
-                    f"\n*** AGENTE DESCUBIERTO: {agent_id} @ {agent.ip_address}:{agent.port} ***\n"
-                )
-                logger.info(f"Agente descubierto: {agent_id} @ {agent.ip_address}")
-        elif msg_type == "ping":
-            logger.info(f"Ping recibido de {from_agent}")
-        elif msg_type == "data":
-            payload = message.get("payload", {})
-            logger.info(f"Datos recibidos de {from_agent}: {payload}")
-        elif msg_type == "command":
-            command = message.get("command", "")
-            logger.info(f"Comando recibido de {from_agent}: {command}")
-
-    def _discover_peers(self):
-        """Descubre peers activamente conectándose a ellos"""
-        time.sleep(2)  # Esperar a que el servidor esté listo
-
-        logger.info("Iniciando descubrimiento de peers...")
-
-        while self.running:
-            for peer in self.peers:
-                try:
-                    parts = peer.split(":")
-                    ip = parts[0]
-                    port = int(parts[1]) if len(parts) > 1 else 5000
-
-                    # Enviar mensaje de descubrimiento
-                    message = {
-                        "type": "discovery",
-                        "agent": self.agent.to_dict(),
-                        "timestamp": time.time(),
-                    }
-
-                    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                    sock.settimeout(3.0)
-                    sock.connect((ip, port))
-                    sock.send(json.dumps(message).encode("utf-8"))
-
-                    # Recibir respuesta
-                    response = sock.recv(4096)
-                    sock.close()
-
-                    logger.info(f"✓ Anuncio enviado a {peer}")
-                    print(f"[INFO] Anuncio de presencia enviado a {peer}")
-
-                except Exception as e:
-                    logger.info(f"✗ No se pudo conectar a peer {peer}: {e}")
-
-            time.sleep(5)  # Intentar cada 5 segundos
-
-    def add_peer(self, peer: str):
-        """Añade un peer a la lista"""
-        if peer not in self.peers:
-            self.peers.append(peer)
-            logger.info(f"Peer añadido: {peer}")
-
-    def send_message(self, target_agent_id: str, message: dict) -> bool:
-        """Envía un mensaje a otro agente"""
-        if target_agent_id not in self.known_agents:
-            logger.error(f"Agente {target_agent_id} no conocido")
-            return False
-
-        target = self.known_agents[target_agent_id]
-
-        try:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(5.0)
-            sock.connect((target.ip_address, target.port))
-
-            message["from_agent"] = self.agent.agent_id
-            message["timestamp"] = time.time()
-
-            sock.send(json.dumps(message).encode("utf-8"))
-
-            # Recibir respuesta
-            response = sock.recv(4096)
-            if response:
-                response_data = json.loads(response.decode("utf-8"))
-                logger.info(f"Respuesta de {target_agent_id}: {response_data}")
-
-            sock.close()
-            return True
-
-        except Exception as e:
-            logger.error(f"Error enviando mensaje a {target_agent_id}: {e}")
-            return False
-
-    def send_ping(self, target_agent_id: str) -> bool:
-        """Envía un ping"""
-        return self.send_message(target_agent_id, {"type": "ping"})
-
-    def send_data(self, target_agent_id: str, payload: dict) -> bool:
-        """Envía datos"""
-        return self.send_message(target_agent_id, {"type": "data", "payload": payload})
-
-    def get_known_agents(self) -> List[ContainerAgent]:
-        """Obtiene lista de agentes conocidos"""
-        return list(self.known_agents.values())
-
-    def print_status(self):
-        """Imprime el estado actual"""
-        print(f"\n{'='*60}")
-        print(f"Agente Local: {self.agent.agent_id}")
-        print(f"  MAC: {self.agent.mac_address}")
-        print(f"  IP: {self.agent.ip_address}:{self.agent.port}")
-        print(f"\nPeers configurados: {len(self.peers)}")
-        for peer in self.peers:
-            print(f"  - {peer}")
-        print(f"\nAgentes Descubiertos: {len(self.known_agents)}")
-        for agent_id, agent in self.known_agents.items():
-            print(f"  - {agent_id}: {agent.ip_address}:{agent.port}")
-        print(f"{'='*60}\n")
-
-
-def get_local_ip() -> str:
-    """Obtiene la IP local"""
-    try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.connect(("8.8.8.8", 80))
-        ip = s.getsockname()[0]
-        s.close()
-        return ip
-    except:
-        return "0.0.0.0"
-
-
-def get_mac_address() -> str:
-    """Obtiene la MAC"""
-    mac = ":".join(
-        ["{:02x}".format((uuid.getnode() >> ele) & 0xFF) for ele in range(0, 8 * 6, 8)][
-            ::-1
-        ]
-    )
-    return mac
-
-
-def main():
-    import argparse
-
-    parser = argparse.ArgumentParser(
-        description="Comunicador de contenedores (TCP directo)"
-    )
-    parser.add_argument("--agent-id", type=str, help="ID del agente")
-    parser.add_argument("--ip", type=str, help="IP del contenedor")
-    parser.add_argument("--mac", type=str, help="Dirección MAC")
-    parser.add_argument("--port", type=int, default=5000, help="Puerto de escucha")
-    parser.add_argument(
-        "--peers", type=str, help="Lista de peers separados por coma (ip:port,ip:port)"
+    mreq = struct.pack(
+        "4sl",
+        socket.inet_aton(MCAST_GRP),
+        socket.INADDR_ANY
     )
 
-    args = parser.parse_args()
+    sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
 
-    agent_id = args.agent_id or f"agent-{uuid.uuid4().hex[:8]}"
-    ip_address = args.ip or get_local_ip()
-    mac_address = args.mac or get_mac_address()
+    while True:
+        data, addr = sock.recvfrom(1024)
+        msg = json.loads(data.decode())
 
-    agent = ContainerAgent(
-        agent_id=agent_id,
-        mac_address=mac_address,
-        ip_address=ip_address,
-        port=args.port,
-    )
+        if msg["id"] == CONTAINER_ID:
+            continue
 
-    peers = []
-    if args.peers:
-        peers = [p.strip() for p in args.peers.split(",")]
+        peers[msg["id"]] = {
+            "ip": msg["ip"],
+            "last_seen": time.time()
+        }
 
-    comm = ContainerCommunicator(agent, peers)
-    comm.start()
-
-    print(f"\nContenedor iniciado:")
-    print(f"  Agent ID: {agent.agent_id}")
-    print(f"  MAC: {agent.mac_address}")
-    print(f"  IP: {agent.ip_address}:{agent.port}")
-    print(f"  Peers: {peers}")
-    print("\nComandos:")
-    print("  status - Estado")
-    print("  list - Listar agentes")
-    print("  add_peer <ip:port> - Añadir peer")
-    print("  ping <agent_id> - Ping")
-    print("  send <agent_id> <msg> - Enviar")
-    print("  quit - Salir\n")
-
-    # Dar tiempo al descubrimiento de empezar
-    time.sleep(0.5)
-
-    try:
-        while True:
-            try:
-                # Verificar si stdin está disponible
-                import select
-                import sys
-
-                # Si no hay stdin (modo background), mantener vivo
-                if not sys.stdin.isatty():
-                    print("[INFO] Modo daemon - esperando conexiones...")
-                    while comm.running:
-                        time.sleep(5)
-                        # Mostrar estado periódicamente
-                        agents = comm.get_known_agents()
-                        if agents:
-                            print(
-                                f"[INFO] Agentes conocidos: {[a.agent_id for a in agents]}"
-                            )
-                    break
-
-                cmd = input("> ").strip()
-
-                if not cmd:
-                    continue
-
-                parts = cmd.split(maxsplit=2)
-                command = parts[0].lower()
-
-                if command == "quit":
-                    break
-                elif command == "status":
-                    comm.print_status()
-                elif command == "list":
-                    agents = comm.get_known_agents()
-                    print(f"\nAgentes: {len(agents)}")
-                    for a in agents:
-                        print(f"  {a.agent_id} - {a.ip_address}:{a.port}")
-                    print()
-                elif command == "add_peer":
-                    if len(parts) < 2:
-                        print("Uso: add_peer <ip:port>")
-                        continue
-                    comm.add_peer(parts[1])
-                elif command == "ping":
-                    if len(parts) < 2:
-                        print("Uso: ping <agent_id>")
-                        continue
-                    if comm.send_ping(parts[1]):
-                        print(f"Ping enviado")
-                elif command == "send":
-                    if len(parts) < 3:
-                        print("Uso: send <agent_id> <mensaje>")
-                        continue
-                    if comm.send_data(parts[1], {"message": parts[2]}):
-                        print(f"Mensaje enviado")
-                else:
-                    print(f"Comando desconocido: {command}")
-
-            except (KeyboardInterrupt, EOFError):
-                print("\nSaliendo...")
-                break
-
-    finally:
-        comm.stop()
-        print("Contenedor detenido")
-
+def monitor():
+    while True:
+        print("\n🔍 Peers descubiertos:")
+        for pid, p in peers.items():
+            print(f"  - {pid[:8]} | {p['ip']}")
+        time.sleep(5)
 
 if __name__ == "__main__":
-    main()
+    print("🟢 Agent iniciado")
+    print(f"ID: {CONTAINER_ID}")
+    print(f"IP: {IP}")
+
+    threading.Thread(target=announce, daemon=True).start()
+    threading.Thread(target=listen, daemon=True).start()
+    monitor()

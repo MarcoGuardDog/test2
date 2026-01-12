@@ -5,20 +5,19 @@ import time
 import json
 import uuid
 
+# Configuración técnica
 MCAST_GRP = "224.0.0.1"
 MCAST_PORT = 5007
 MY_ID = str(uuid.uuid4())[:8]
+TIMEOUT_NODOS = 10  # Segundos para considerar a un nodo como desconectado
 
 
 class RHELDiscovery:
     def __init__(self):
-        self.peers = {}
+        self.peers = {}  # Diccionario para guardar { id: {ip, mac, last_seen} }
+        self.lock = threading.Lock()  # Para evitar errores al leer/escribir peers
         self.ip = self._get_ip()
-        self.mac = ":".join(
-            ["{:02x}".format((uuid.getnode() >> i) & 0xFF) for i in range(0, 48, 8)][
-                ::-1
-            ]
-        )
+        self.mac = self._get_mac()
 
     def _get_ip(self):
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -30,26 +29,32 @@ class RHELDiscovery:
         finally:
             s.close()
 
+    def _get_mac(self):
+        # Obtiene la dirección MAC de la interfaz activa
+        mac_num = hex(uuid.getnode()).replace("0x", "").zfill(12)
+        return ":".join(mac_num[i : i + 2] for i in range(0, 11, 2))
+
     def sender(self):
+        """Hilo que anuncia nuestra presencia (Beacon)"""
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
         sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 2)
         sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_LOOP, 1)
-
-        # Forzar el envío por la IP de la interfaz principal
         sock.setsockopt(
             socket.IPPROTO_IP, socket.IP_MULTICAST_IF, socket.inet_aton(self.ip)
         )
 
-        data = json.dumps(
-            {"id": MY_ID, "ip": self.ip, "mac": self.mac, "ts": time.time()}
-        ).encode("utf-8")
+        # El mensaje incluye ID, IP y MAC
+        payload = {"id": MY_ID, "ip": self.ip, "mac": self.mac}
 
-        print(f"[*] Nodo {MY_ID} iniciado en RHEL ({self.ip})")
+        print(f"[*] Iniciando Nodo: {MY_ID} | IP: {self.ip} | MAC: {self.mac}")
+
         while True:
+            data = json.dumps(payload).encode("utf-8")
             sock.sendto(data, (MCAST_GRP, MCAST_PORT))
-            time.sleep(3)
+            time.sleep(3)  # Anunciar cada 3 segundos
 
     def listener(self):
+        """Hilo que escucha a otros contenedores"""
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         if hasattr(socket, "SO_REUSEPORT"):
@@ -57,7 +62,6 @@ class RHELDiscovery:
 
         sock.bind(("", MCAST_PORT))
 
-        # Unirse al grupo indicando la IP local para evitar ambigüedades en RHEL
         mreq = struct.pack(
             "4s4s", socket.inet_aton(MCAST_GRP), socket.inet_aton(self.ip)
         )
@@ -67,23 +71,58 @@ class RHELDiscovery:
             try:
                 data, addr = sock.recvfrom(1024)
                 info = json.loads(data.decode("utf-8"))
+
                 if info["id"] != MY_ID:
-                    self.peers[info["id"]] = {**info, "last_seen": time.time()}
-            except:
-                pass
+                    with self.lock:
+                        # Si es nuevo, avisamos
+                        if info["id"] not in self.peers:
+                            print(
+                                f"\n[+] Nodo detectado: ID={info['id']} IP={info['ip']} MAC={info['mac']}"
+                            )
+
+                        # Guardamos/Actualizamos datos y marca de tiempo
+                        self.peers[info["id"]] = {
+                            "ip": info["ip"],
+                            "mac": info["mac"],
+                            "last_seen": time.time(),
+                        }
+            except Exception as e:
+                print(f"Error en listener: {e}")
+
+    def cleaner(self):
+        """Hilo encargado de eliminar nodos desconectados"""
+        while True:
+            time.sleep(2)
+            now = time.time()
+            with self.lock:
+                to_delete = []
+                for node_id, data in self.peers.items():
+                    if now - data["last_seen"] > TIMEOUT_NODOS:
+                        to_delete.append(node_id)
+
+                for node_id in to_delete:
+                    print(f"\n[-] Nodo desconectado (timeout): {node_id}")
+                    del self.peers[node_id]
+
+    def display(self):
+        """Imprime la tabla de nodos actuales"""
+        while True:
+            time.sleep(5)
+            with self.lock:
+                if self.peers:
+                    print("\n--- CONTENEDORES ACTIVOS ---")
+                    for node_id, data in self.peers.items():
+                        print(f"ID: {node_id} | IP: {data['ip']} | MAC: {data['mac']}")
+                    print("----------------------------\n")
 
     def start(self):
+        # Lanzar todos los hilos
         threading.Thread(target=self.sender, daemon=True).start()
         threading.Thread(target=self.listener, daemon=True).start()
-        while True:
-            now = time.time()
-            self.peers = {
-                k: v for k, v in self.peers.items() if now - v["last_seen"] < 10
-            }
-            if self.peers:
-                print(f"\r[Nodos]: {list(self.peers.keys())}", end="")
-            time.sleep(1)
+        threading.Thread(target=self.cleaner, daemon=True).start()
+        self.display()
 
 
 if __name__ == "__main__":
-    RHELDiscovery().start()
+    discovery = RHELDiscovery()
+    discovery.start()

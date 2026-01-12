@@ -1,98 +1,89 @@
 import socket
+import struct
 import threading
 import time
-import uuid
 import json
+import uuid
 
-# Rango de puertos reservados para nuestros contenedores
-# Si planeas tener 10 contenedores, reserva del 5000 al 5010
-PORT_RANGE = range(5000, 5010)
+MCAST_GRP = "224.0.0.1"
+MCAST_PORT = 5007
 MY_ID = str(uuid.uuid4())[:8]
 
 
-class TCPDiscovery:
+class RHELDiscovery:
     def __init__(self):
         self.peers = {}
-        self.my_port = None
+        self.ip = self._get_ip()
+        self.mac = ":".join(
+            ["{:02x}".format((uuid.getnode() >> i) & 0xFF) for i in range(0, 48, 8)][
+                ::-1
+            ]
+        )
 
-    def get_my_info(self):
-        # Obtenemos IP y MAC (simplificado para el ejemplo)
-        hostname = socket.gethostname()
-        ip = socket.gethostbyname(hostname)
-        return {"id": MY_ID, "ip": ip, "port": self.my_port}
+    def _get_ip(self):
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            s.connect(("8.8.8.8", 80))
+            return s.getsockname()[0]
+        except:
+            return "127.0.0.1"
+        finally:
+            s.close()
 
-    def start_server(self):
-        """Intenta levantar el servidor en el primer puerto disponible del rango"""
-        for port in PORT_RANGE:
+    def sender(self):
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+        sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 2)
+        sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_LOOP, 1)
+
+        # Forzar el envío por la IP de la interfaz principal
+        sock.setsockopt(
+            socket.IPPROTO_IP, socket.IP_MULTICAST_IF, socket.inet_aton(self.ip)
+        )
+
+        data = json.dumps(
+            {"id": MY_ID, "ip": self.ip, "mac": self.mac, "ts": time.time()}
+        ).encode("utf-8")
+
+        print(f"[*] Nodo {MY_ID} iniciado en RHEL ({self.ip})")
+        while True:
+            sock.sendto(data, (MCAST_GRP, MCAST_PORT))
+            time.sleep(3)
+
+    def listener(self):
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        if hasattr(socket, "SO_REUSEPORT"):
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+
+        sock.bind(("", MCAST_PORT))
+
+        # Unirse al grupo indicando la IP local para evitar ambigüedades en RHEL
+        mreq = struct.pack(
+            "4s4s", socket.inet_aton(MCAST_GRP), socket.inet_aton(self.ip)
+        )
+        sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
+
+        while True:
             try:
-                self.server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                self.server_sock.bind(("0.0.0.0", port))
-                self.server_sock.listen(5)
-                self.my_port = port
-                print(f"[*] Servidor iniciado en puerto {port} (ID: {MY_ID})")
-                break
-            except socket.error:
-                continue
-
-        if not self.my_port:
-            print("[!] No hay puertos disponibles en el rango.")
-            return
-
-        while True:
-            conn, addr = self.server_sock.accept()
-            data = conn.recv(1024)
-            if data:
-                # Responder con nuestra info cuando alguien nos "descubre"
-                conn.send(json.dumps(self.get_my_info()).encode())
-            conn.close()
-
-    def discover_peers(self):
-        """Escanea el rango de puertos para encontrar otros contenedores"""
-        while True:
-            for port in PORT_RANGE:
-                if port == self.my_port:
-                    continue
-
-                try:
-                    # Intentamos conectar para ver si hay otro contenedor
-                    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                    sock.settimeout(0.2)  # Timeout rápido
-                    sock.connect(("127.0.0.1", port))
-
-                    # Enviamos un "hola" para pedir su info
-                    sock.send(b"HELLO")
-                    data = sock.recv(1024)
-                    if data:
-                        peer_info = json.loads(data.decode())
-                        peer_id = peer_info["id"]
-                        if peer_id not in self.peers:
-                            print(f"\n[+] Nuevo contenedor TCP detectado: {peer_info}")
-                        self.peers[peer_id] = peer_info
-                    sock.close()
-                except (socket.timeout, ConnectionRefusedError):
-                    # Si falla, es que no hay nadie en ese puerto
-                    continue
-
-            time.sleep(5)  # Escanear cada 5 segundos
+                data, addr = sock.recvfrom(1024)
+                info = json.loads(data.decode("utf-8"))
+                if info["id"] != MY_ID:
+                    self.peers[info["id"]] = {**info, "last_seen": time.time()}
+            except:
+                pass
 
     def start(self):
-        # Hilo para que otros me encuentren
-        t1 = threading.Thread(target=self.start_server, daemon=True)
-        # Hilo para yo buscar a otros
-        t2 = threading.Thread(target=self.discover_peers, daemon=True)
-
-        t1.start()
-        # Esperar un poco a que el server levante
-        time.sleep(1)
-        t2.start()
-
-        try:
-            while True:
-                time.sleep(1)
-        except KeyboardInterrupt:
-            print("Cerrando...")
+        threading.Thread(target=self.sender, daemon=True).start()
+        threading.Thread(target=self.listener, daemon=True).start()
+        while True:
+            now = time.time()
+            self.peers = {
+                k: v for k, v in self.peers.items() if now - v["last_seen"] < 10
+            }
+            if self.peers:
+                print(f"\r[Nodos]: {list(self.peers.keys())}", end="")
+            time.sleep(1)
 
 
 if __name__ == "__main__":
-    discovery = TCPDiscovery()
-    discovery.start()
+    RHELDiscovery().start()

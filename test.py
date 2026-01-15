@@ -44,12 +44,12 @@ class RHELDiscovery:
         )
 
         # El mensaje incluye ID, IP y MAC
-        payload = {"id": MY_ID, "ip": self.ip, "mac": self.mac}
+        payload = "gAAAAABpaVJBChHKNz1XI7SYdGPYZ_Ysr5B7fAzy2l1sv6JRjiIpbIWG96lgCm5uTPoSrxjTfPlpGEPDgksVq-Jd7QvI6Y9pB5eBWgqupdTEf3nOiHCAX3IildQDlwDR9ODmeYbS5LxR-JBUZDlWWaMet-lJ6mCyPwjhainQrolBtKx7FJbuDzZz1JwjxoQ8GHzoSRD8Q5U5x-GRTBPpF5i1P2ASBALE7vqiAkglfIAKtp0aIcXM684="
 
         print(f"[*] Iniciando Nodo: {MY_ID} | IP: {self.ip} | MAC: {self.mac}")
 
         while True:
-            data = json.dumps(payload).encode("utf-8")
+            data = payload.encode("utf-8")
             sock.sendto(data, (MCAST_GRP, MCAST_PORT))
             time.sleep(3)  # Anunciar cada 3 segundos
 

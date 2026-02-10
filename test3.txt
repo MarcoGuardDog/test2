@@ -1,0 +1,12 @@
+
+
+IMAGEN="docker.io/guarddogai/prod:latest"
+FIDO_NAME=$1
+EMAIL=$2
+LICENSE=$3
+
+
+
+
+sudo mkdir /etc/guarddog_$FIDO_NAME
+docker run  -it --cap-add NET_ADMIN -e ENV=dev --net=host --privileged --restart always -v /etc/guarddog_$FIDO_NAME:/etc/guarddog --name $FIDO_NAME $IMAGEN --dxc --device_name=$FIDO_NAME --email=$EMAIL --license=$LICENSE --env=DEV
